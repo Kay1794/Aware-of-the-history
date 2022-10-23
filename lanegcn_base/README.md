@@ -8,7 +8,7 @@
 
 ## Data preparation & Environment:
 
-This code is based on the official code of LaneGCN ([Paper](https://arxiv.org/pdf/2007.13732.pdf); [Github](https://github.com/uber-research/LaneGCN)). PLease follow the instructions from LaneGCN official github to install the relative packages and the preprocessed Argoverse Dataset[link](https://www.argoverse.org/av1.html#download-link). Then please download and unzip our preprocessed Argoverse Behavior database from this link [link](https://drive.google.com/file/d/1GmnCd4ByA9s6b9RKgQHD3wipQn-MP91u/view?usp=sharing).
+This code is based on the official code of LaneGCN ([Paper](https://arxiv.org/pdf/2007.13732.pdf); [Github](https://github.com/uber-research/LaneGCN)). PLease follow the instructions from LaneGCN official github to install the relative packages and the preprocessed Argoverse Dataset[link](https://www.argoverse.org/av1.html#download-link). Then please download and unzip our preprocessed Argoverse Behavior database from [link](https://drive.google.com/file/d/1GmnCd4ByA9s6b9RKgQHD3wipQn-MP91u/view?usp=sharing).
 
 ## Command:
 
