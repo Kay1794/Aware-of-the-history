@@ -7,7 +7,7 @@
 
 ## Overview
 
-LBA / LBF implementation for LaneGCN (released) [link]
+LBA / LBF implementation for LaneGCN (released) [link](https://github.com/Kay1794/Aware-of-the-history/tree/master/lanegcn_base)
 
 LBA / LBF implementation for P2T (SOON)
 
