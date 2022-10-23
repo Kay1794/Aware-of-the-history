@@ -1,4 +1,4 @@
- # Copyright (c) 2020 Uber Technologies, Inc.
+# Copyright (c) 2020 Uber Technologies, Inc.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
@@ -71,18 +71,18 @@ config["train_split"] = os.path.join(
     root_path, "dataset/train/data"
 )
 config["val_split"] = os.path.join(root_path, "dataset/val/data")
-config["test_split"] = os.path.join('/GPFS/data/sihengchen/model_result/argo_lanegcn/', "dataset/test_obs/data")
+config["val_split"] = os.path.join(root_path, "dataset/test_obs/data")
 
 # Preprocessed Dataset
 config["preprocess"] = True # whether use preprocess or not
 config["preprocess_train"] = os.path.join(
-    root_path, "train_crs_dist6_angle90.p"
+    root_path, "dataset/train_crs_dist6_angle90.p"
 )
 config["preprocess_val"] = os.path.join(
-    root_path ,"val_crs_dist6_angle90.p"
+    root_path,"dataset/val_crs_dist6_angle90.p"
 )
-#config['preprocess_test'] = os.path.join(root_path, 'test_test.p')
-config['preprocess_test'] = os.path.join('/GPFS/data/sihengchen/argo/lanegcn/', 'test_test.p')
+config['preprocess_test'] = os.path.join(root_path, 'dataset/test_test.p')
+
 """Model"""
 config["rot_aug"] = False
 config["pred_range"] = [-100.0, 100.0, -100.0, 100.0]
@@ -130,18 +130,12 @@ class Net(nn.Module):
         self.student = StudentNet(config)
 
     def forward(self, data: Dict,training=True) -> Dict[str, List[Tensor]]:
-    
-    
-        if training:
-            teacher_out,behavior_target = self.teacher(deepcopy(data))
-            student_out,behavior_student = self.student(deepcopy(data))
-            student_out['neighbor_num'] = teacher_out['neighbor_num']
 
-            return teacher_out,student_out,behavior_target,behavior_student
-        else:
-            student_out,behavior_student = self.student(deepcopy(data))
+        teacher_out,behavior_target = self.teacher(deepcopy(data))
+        student_out,behavior_student = self.student(deepcopy(data))
+        student_out['neighbor_num'] = teacher_out['neighbor_num']
 
-            return student_out
+        return teacher_out,student_out,behavior_target,behavior_student
 
 
 class TeacherNet(nn.Module):
@@ -182,8 +176,8 @@ class TeacherNet(nn.Module):
         self.pred_net = PredNet(config)
 
     def forward(self, data: Dict,training=True) -> Dict[str, List[Tensor]]:
-        #if self.config['double_kd']:
-        behavior_target = []
+        if self.config['double_kd']:
+            behavior_target = []
         # construct actor feature
 
         actors, actor_idcs = actor_gather(gpu(data["feats"]))
@@ -952,6 +946,129 @@ class BehaviorM2A(nn.Module):
             )
         return actors,neighbor_num
 
+class BehaviorM2M(nn.Module):
+    """
+    The lane to lane block: propagates information over lane
+            graphs and updates the features of lane nodes
+    """
+    def __init__(self, config):
+        super(BehaviorM2M, self).__init__()
+        self.config = config
+        n_map = config["n_map"] 
+        n_sem = config["n_behavior"]
+        norm = "GN"
+        ng = 1
+
+        keys = ["ctr", "norm", "ctr2", "left", "right"]
+        for i in range(config["num_scales"]):
+            keys.append("pre" + str(i))
+            keys.append("suc" + str(i))
+
+        fuse = dict()
+        for key in keys:
+            fuse[key] = []
+
+        for i in range(4):
+            for key in fuse:
+                if key in ["norm"]:
+                    fuse[key].append(nn.GroupNorm(gcd(ng, n_map), n_map))
+                elif key in ["ctr2"]:
+                    fuse[key].append(Linear(n_map, n_map, norm=norm, ng=ng, act=False))
+                elif key in ["ctr"]:
+                    fuse[key].append(Linear(n_map+n_sem, n_map, norm=norm, ng=ng, act=False))
+                else:
+                    fuse[key].append(nn.Linear(n_sem, n_map, bias=False))
+
+        for key in fuse:
+            fuse[key] = nn.ModuleList(fuse[key])
+        self.fuse = nn.ModuleDict(fuse)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, feat: Tensor,graph: Dict,use_relu: bool=True) -> Tensor:
+        """fuse map"""
+        res = feat
+        sem_feat = graph['behavior']
+        for i in range(len(self.fuse["ctr"])):
+            temp = self.fuse["ctr"][i](torch.cat((feat,sem_feat),dim=-1))
+            for key in self.fuse:
+                if key.startswith("pre") or key.startswith("suc"):
+                    k1 = key[:3]
+                    k2 = int(key[3:])
+                    temp.index_add_(
+                        0,
+                        graph[k1][k2]["u"],
+                        self.fuse[key][i](sem_feat[graph[k1][k2]["v"]]),
+                    )
+
+            if len(graph["left"]["u"] > 0):
+                temp.index_add_(
+                    0,
+                    graph["left"]["u"],
+                    self.fuse["left"][i](sem_feat[graph["left"]["v"]]),
+                )
+            if len(graph["right"]["u"] > 0):
+                temp.index_add_(
+                    0,
+                    graph["right"]["u"],
+                    self.fuse["right"][i](sem_feat[graph["right"]["v"]]),
+                )
+
+            feat = self.fuse["norm"][i](temp)
+            feat = self.relu(feat)
+
+            feat = self.fuse["ctr2"][i](feat)
+            feat += res
+            if use_relu:
+                    feat = self.relu(feat)
+            res = feat
+        return feat
+
+
+class BehaviorFuse(nn.Module):
+    """
+    The lane to actor block fuses updated
+        map information from lane nodes to actor nodes
+    """
+    def __init__(self, config,dest = False):
+        super(BehaviorFuse, self).__init__()
+        self.config = config
+        norm = "GN"
+        ng = 1
+
+
+        n_map = config["n_map"]
+        n_sem = config['n_behavior']
+        if n_map != n_sem:
+            self.mapping =  nn.Sequential(
+                    Linear(n_sem, n_sem, norm=norm, ng=ng),
+                    Linear(n_sem, n_map, norm=norm, ng=ng),
+                    Linear(n_map, n_map, norm=norm, ng=ng)
+                    )
+            self.use_project = True
+        else:
+            self.use_project = False
+
+        att = []
+        for i in range(2):
+            att.append(Att(n_map, n_map))
+        self.att = nn.ModuleList(att)
+
+    def forward(self, node_geo: Tensor, node_idcs: List[Tensor], node_ctrs: List[Tensor], node_sem: Tensor,use_relu: bool=True) -> Tensor:
+        if self.use_project:
+            node_sem = self.mapping(node_sem)
+        for i in range(len(self.att)):
+            
+            actors = self.att[i](
+                node_geo,
+                node_idcs,
+                node_ctrs,
+                node_sem,
+                node_idcs,
+                node_ctrs,
+                self.config["map2map_dist"],
+                use_relu
+            )
+        return actors
 
 
 class A2A(nn.Module):
@@ -1530,11 +1647,13 @@ def get_model(args):
             root_path, "results", args.comment
         )
     config['num_epochs'] = args.nepoch
-    config['behavior_loss'] = args.behavior_loss
     config["batch_size"] = args.nbatch
     config["val_batch_size"] = config["batch_size"]
     config['n_behavior'] = args.n_behavior
+    config['sem_pos_only'] = args.sem_pos_only
+    config['behavior_loss'] = args.behavior_loss
     config['kd_weight'] = args.kd_weight
+    config['kd_decay'] = args.kd_decay
     config['double_kd'] = args.double_kd
     config['dest_kd'] = args.dest_kd
     config['behavior_min_size'] = args.behavior_min_size
